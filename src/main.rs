@@ -1,9 +1,15 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
+use std::fs;
+use std::fs::File;
+use std::io::Write;
 use std::ops::Add;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
+
+use tempfile::TempDir;
 
 fn main() {}
 
@@ -13,7 +19,7 @@ trait FileSystem {
     /// Overwrite the contents of the file identified by `file_id` with `contents`.
     fn write(&mut self, file_id: u64, contents: Vec<u8>);
     /// Read the contents of the file identified by `file_id`.
-    fn read(&self, file_id: u64) -> Option<&[u8]>;
+    fn read(&self, file_id: u64) -> Option<Vec<u8>>;
     /// Return the name of the file system.
     fn name(&self) -> &'static str;
     // Not dyn-compatible.
@@ -38,8 +44,8 @@ impl FileSystem for InMemoryFileSystem {
         self.files.insert(file_id, contents);
     }
 
-    fn read(&self, file_id: u64) -> Option<&[u8]> {
-        self.files.get(&file_id).map(|v| v.as_slice())
+    fn read(&self, file_id: u64) -> Option<Vec<u8>> {
+        self.files.get(&file_id).map(|v| v.clone())
     }
 
     fn name(&self) -> &'static str {
@@ -47,33 +53,41 @@ impl FileSystem for InMemoryFileSystem {
     }
 }
 
-/// An implementation of the Ext2 file system.
-struct Ext2 {
-    /// Use your imagination and pretend that this is a real
-    /// implementation instead of wrapping the in-memory
-    /// implementation.
-    fs: InMemoryFileSystem,
+/// A file system that wraps a temp directory.
+struct TempDirFileSystem {
+    temp_dir: TempDir,
 }
 
-impl Ext2 {
+impl TempDirFileSystem {
     fn new() -> Self {
         Self {
-            fs: InMemoryFileSystem::new(),
+            temp_dir: TempDir::new().unwrap(),
         }
+    }
+
+    fn path(&self, file_id: u64) -> PathBuf {
+        self.temp_dir.path().join(file_id.to_string())
     }
 }
 
-impl FileSystem for Ext2 {
+impl FileSystem for TempDirFileSystem {
     fn write(&mut self, file_id: u64, contents: Vec<u8>) {
-        self.fs.write(file_id, contents);
+        let path = self.path(file_id);
+        let mut file = if !path.exists() {
+            File::create(path).unwrap()
+        } else {
+            File::open(path).unwrap()
+        };
+        file.write(&contents).unwrap();
     }
 
-    fn read(&self, file_id: u64) -> Option<&[u8]> {
-        self.fs.read(file_id)
+    fn read(&self, file_id: u64) -> Option<Vec<u8>> {
+        let path = self.path(file_id);
+        fs::read(path).ok()
     }
 
     fn name(&self) -> &'static str {
-        "Ext2"
+        "Temp FileSystem"
     }
 }
 
@@ -110,7 +124,7 @@ impl<T: FileSystem> GenericDatabase<T> {
         self.fs.write(*id, value);
     }
 
-    fn get(&self, key: &[u8]) -> Option<&[u8]> {
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         let id = self.key_map.get(key)?;
         self.fs.read(*id)
     }
@@ -121,11 +135,11 @@ fn test_generic_database() {
     let mut db: GenericDatabase<InMemoryFileSystem> =
         GenericDatabase::new(InMemoryFileSystem::new());
     db.set(b"ny".to_vec(), b"albany".to_vec());
-    assert_eq!(db.get(b"ny"), Some(b"albany".as_slice()));
+    assert_eq!(db.get(b"ny"), Some(b"albany".to_vec()));
 
-    let mut db: GenericDatabase<Ext2> = GenericDatabase::new(Ext2::new());
+    let mut db: GenericDatabase<TempDirFileSystem> = GenericDatabase::new(TempDirFileSystem::new());
     db.set(b"maryland".to_vec(), b"annapolis".to_vec());
-    assert_eq!(db.get(b"maryland"), Some(b"annapolis".as_slice()));
+    assert_eq!(db.get(b"maryland"), Some(b"annapolis".to_vec()));
 }
 
 #[test]
@@ -133,7 +147,7 @@ fn test_generic_database_welcome() {
     let db: GenericDatabase<InMemoryFileSystem> = GenericDatabase::new(InMemoryFileSystem::new());
     db.welcome();
 
-    let db: GenericDatabase<Ext2> = GenericDatabase::new(Ext2::new());
+    let db: GenericDatabase<TempDirFileSystem> = GenericDatabase::new(TempDirFileSystem::new());
     db.welcome();
 }
 
@@ -163,22 +177,22 @@ impl InMemoryDatabase {
         self.fs.write(*id, value);
     }
 
-    fn get(&self, key: &[u8]) -> Option<&[u8]> {
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         let id = self.key_map.get(key)?;
         self.fs.read(*id)
     }
 }
 
-struct Ext2Database {
-    fs: Ext2,
+struct TempDirDatabase {
+    fs: TempDirFileSystem,
     next_id: u64,
     /// The value of each key is stored in its own file ... maybe not
     /// the most efficient.
     key_map: HashMap<Vec<u8>, u64>,
 }
 
-impl Ext2Database {
-    fn new(fs: Ext2) -> Self {
+impl TempDirDatabase {
+    fn new(fs: TempDirFileSystem) -> Self {
         Self {
             fs,
             next_id: 0,
@@ -195,7 +209,7 @@ impl Ext2Database {
         self.fs.write(*id, value);
     }
 
-    fn get(&self, key: &[u8]) -> Option<&[u8]> {
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         let id = self.key_map.get(key)?;
         self.fs.read(*id)
     }
@@ -205,11 +219,11 @@ impl Ext2Database {
 fn test_concrete_generic_database() {
     let mut db: InMemoryDatabase = InMemoryDatabase::new(InMemoryFileSystem::new());
     db.set(b"ny".to_vec(), b"albany".to_vec());
-    assert_eq!(db.get(b"ny"), Some(b"albany".as_slice()));
+    assert_eq!(db.get(b"ny"), Some(b"albany".to_vec()));
 
-    let mut db: Ext2Database = Ext2Database::new(Ext2::new());
+    let mut db: TempDirDatabase = TempDirDatabase::new(TempDirFileSystem::new());
     db.set(b"maryland".to_vec(), b"annapolis".to_vec());
-    assert_eq!(db.get(b"maryland"), Some(b"annapolis".as_slice()));
+    assert_eq!(db.get(b"maryland"), Some(b"annapolis".to_vec()));
 }
 
 // Generic function example.
@@ -280,7 +294,7 @@ impl DynamicDatabase {
         self.fs.write(*id, value);
     }
 
-    fn get(&self, key: &[u8]) -> Option<&[u8]> {
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         let id = self.key_map.get(key)?;
         self.fs.read(*id)
     }
@@ -290,11 +304,11 @@ impl DynamicDatabase {
 fn test_dynamic_database() {
     let mut db: DynamicDatabase = DynamicDatabase::new(Box::new(InMemoryFileSystem::new()));
     db.set(b"ny".to_vec(), b"albany".to_vec());
-    assert_eq!(db.get(b"ny"), Some(b"albany".as_slice()));
+    assert_eq!(db.get(b"ny"), Some(b"albany".to_vec()));
 
-    let mut db: DynamicDatabase = DynamicDatabase::new(Box::new(Ext2::new()));
+    let mut db: DynamicDatabase = DynamicDatabase::new(Box::new(TempDirFileSystem::new()));
     db.set(b"maryland".to_vec(), b"annapolis".to_vec());
-    assert_eq!(db.get(b"maryland"), Some(b"annapolis".as_slice()));
+    assert_eq!(db.get(b"maryland"), Some(b"annapolis".to_vec()));
 }
 
 #[test]
@@ -302,7 +316,7 @@ fn test_dynamic_database_welcome() {
     let db: DynamicDatabase = DynamicDatabase::new(Box::new(InMemoryFileSystem::new()));
     db.welcome();
 
-    let db: DynamicDatabase = DynamicDatabase::new(Box::new(Ext2::new()));
+    let db: DynamicDatabase = DynamicDatabase::new(Box::new(TempDirFileSystem::new()));
     db.welcome();
 }
 
@@ -609,28 +623,28 @@ fn test_generic_processor() {
 
 enum FileSystemEnum {
     InMemory(InMemoryFileSystem),
-    Ext2(Ext2),
+    TempDir(TempDirFileSystem),
 }
 
 impl FileSystemEnum {
     fn write(&mut self, file_id: u64, contents: Vec<u8>) {
         match self {
             FileSystemEnum::InMemory(fs) => fs.write(file_id, contents),
-            FileSystemEnum::Ext2(fs) => fs.write(file_id, contents),
+            FileSystemEnum::TempDir(fs) => fs.write(file_id, contents),
         }
     }
 
-    fn read(&self, file_id: u64) -> Option<&[u8]> {
+    fn read(&self, file_id: u64) -> Option<Vec<u8>> {
         match self {
             FileSystemEnum::InMemory(fs) => fs.read(file_id),
-            FileSystemEnum::Ext2(fs) => fs.read(file_id),
+            FileSystemEnum::TempDir(fs) => fs.read(file_id),
         }
     }
 
     fn name(&self) -> &'static str {
         match self {
             FileSystemEnum::InMemory(fs) => fs.name(),
-            FileSystemEnum::Ext2(fs) => fs.name(),
+            FileSystemEnum::TempDir(fs) => fs.name(),
         }
     }
 }
@@ -668,7 +682,7 @@ impl EnumDatabase {
         self.fs.write(*id, value);
     }
 
-    fn get(&self, key: &[u8]) -> Option<&[u8]> {
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         let id = self.key_map.get(key)?;
         self.fs.read(*id)
     }
@@ -678,11 +692,11 @@ impl EnumDatabase {
 fn test_enum_database() {
     let mut db = EnumDatabase::new(FileSystemEnum::InMemory(InMemoryFileSystem::new()));
     db.set(b"ny".to_vec(), b"albany".to_vec());
-    assert_eq!(db.get(b"ny"), Some(b"albany".as_slice()));
+    assert_eq!(db.get(b"ny"), Some(b"albany".to_vec()));
     db.welcome();
 
-    let mut db = EnumDatabase::new(FileSystemEnum::Ext2(Ext2::new()));
+    let mut db = EnumDatabase::new(FileSystemEnum::TempDir(TempDirFileSystem::new()));
     db.set(b"maryland".to_vec(), b"annapolis".to_vec());
-    assert_eq!(db.get(b"maryland"), Some(b"annapolis".as_slice()));
+    assert_eq!(db.get(b"maryland"), Some(b"annapolis".to_vec()));
     db.welcome();
 }
